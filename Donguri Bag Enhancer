@@ -1,0 +1,184 @@
+// ==UserScript==
+// @name         Donguri Bag Enhancer
+// @namespace    https://donguri.5ch.net/
+// @version      2.1.3
+// @description  5ちゃんねる「どんぐりシステム」の「アイテムバッグ」ページ機能改良スクリプト。
+// @author       どんぐりID: bb97c8d2
+// @contributor  ChatGPT (OpenAI, assistant)
+// @license      Non-Commercial Personal Use Only
+// @match        https://donguri.5ch.net/bag
+// @run-at       document-end
+// @grant        none
+// ==/UserScript==
+
+/*
+Copyright (c) 2025 bb97c8d2
+
+本スクリプトは、非商用・個人利用に限り、自由に使用・改変・再配布が可能です。
+商用利用、再販売、営利目的での利用は禁止します。
+利用により生じた損害について、作者は一切の責任を負いません。
+*/
+
+(function() {
+    'use strict';
+
+    // --- ① 空の <p> を削除 ---
+    document.querySelectorAll('p').forEach(p => {
+        if (!p.textContent.trim() && p.children.length === 0) {
+            p.remove();
+        }
+    });
+
+    // --- ② CSS 注入 ---
+    const style = document.createElement('style');
+    style.textContent = `
+        @media (min-width:800px){
+            img[src*="acorn-bag.jpg"] {
+                float: right;
+                margin: 0 0 1em 1em;
+                max-width: 40%;
+            }
+        }
+        form[action*="recycleunlocked"] button {
+            display: block;
+            margin: 8px auto;
+            font-size: 1em;
+            padding: 4px 8px;
+        }
+        #treasurebox {
+            list-style: none;
+            padding: 0;
+            margin: 0 auto;
+            display: flex;
+            justify-content: center;
+            gap: 1em;
+            flex-wrap: wrap;
+            font-size: 1.2em;
+            font-weight: bold;
+        }
+       #weaponEquiped,
+       #armorEquiped,
+       #necklaceEquiped {
+           min-width: 100％;
+           margin: 0em;
+       }
+    `;
+    document.head.appendChild(style);
+
+    // --- ③ 装備中アイテム見出し＆テーブルID付与 ---
+    (function insertEquippedSection(){
+        const header = document.querySelector('header');
+        if (!header) return;
+       // 見出し追加
+       header.insertAdjacentHTML('afterend',
+         '<h2 style="font-size:1.5em; margin-top:1em;"><span style="color:red;">&block;</span> 装備中のアイテム</h2>');
+
+        // 「装備している…」見出しをすべて処理
+        Array.from(document.querySelectorAll('h3')).forEach(h3 => {
+            const text = h3.textContent;
+            if (!text.includes('装備している')) return;
+            // 次の要素が <p> や <div> かもしれないので、テーブルを探す
+            const table = h3.parentNode.querySelector('table');
+            if (table) {
+                if (text.includes('武器')) {
+                    table.id = 'weaponEquiped';
+                } else if (text.includes('防具')) {
+                    table.id = 'armorEquiped';
+                } else if (text.includes('ネックレス')) {
+                    table.id = 'necklaceEquiped';
+                }
+            }
+            // 見出し自身を削除
+            h3.remove();
+        });
+    })();
+
+    // --- ④ 宝箱リンクの置換 ---
+    (function replaceTreasureLinks(){
+        const anchors = Array.from(document.querySelectorAll('h3>a'))
+            .filter(a => a.getAttribute('href').endsWith('chest'));
+        if (anchors.length === 0) return;
+        const ul = document.createElement('ul');
+        ul.id = 'treasurebox';
+        ul.innerHTML = `
+            <li><a href="https://donguri.5ch.net/chest">宝箱</a></li>
+            <li><a href="https://donguri.5ch.net/battlechest">バトル宝箱</a></li>
+        `;
+        const firstH3 = anchors[0].parentNode;
+        firstH3.parentNode.insertBefore(ul, firstH3);
+        anchors.forEach(a => a.parentNode.remove());
+    })();
+
+    // --- ⑤ アイテム数サマリの挿入 ---
+    (function insertItemSummary(){
+        const box = document.getElementById('treasurebox');
+        if (!box) return;
+        function countRows(id) {
+            const table = document.getElementById(id);
+            return table && table.rows.length > 1 ? table.rows.length - 1 : 0;
+        }
+        const n = countRows('necklaceTable');
+        const w = countRows('weaponTable');
+        const a = countRows('armorTable');
+        const tot = n + w + a;
+        const info = document.createElement('div');
+        info.style.marginTop = '1em';
+        info.innerHTML = `
+            <div style="font-size:1.1em;font-weight:bold">所持アイテム総数：${tot}</div>
+            <div style="font-size:1em">（ネックレス：${n}個／武器：${w}個／防具：${a}個）</div>
+        `;
+        const next = box.nextElementSibling;
+        if (next) next.parentNode.insertBefore(info, next);
+        else box.parentNode.appendChild(info);
+    })();
+
+    // --- ⑥ 分解ボタンのラベル置換 ---
+    document.querySelectorAll('form[action*="recycleunlocked"] button').forEach(btn => {
+        if (btn.textContent.includes('武器防具')) {
+            btn.textContent = 'ロックされていないアイテムを全て分解する';
+        }
+    });
+
+    // --- ⑦ 「アイテムバッグ」見出しの整理 ---
+   (function replaceBagHeading(){
+       const headings = Array.from(document.querySelectorAll('h1, h3'))
+           .filter(el => el.textContent.trim().startsWith('アイテムバッグ'));
+       if (headings.length < 2) return;
+       const old = headings[1];
+       const h2 = document.createElement('h2');
+       h2.style.fontSize  = '1.5em';
+       h2.style.marginTop = '1em';
+       h2.innerHTML = '<span style="color:red;">&block;</span> 所持アイテム一覧';
+       old.replaceWith(h2);
+   })();
+
+    // --- ⑧ サーバー由来の h3/h4/h5 タグを div に置き換え ---
+    // ページ読み込み時に存在する h3/h4/h5 タグにマーカーを付与
+    ['h3','h4','h5'].forEach(tag => {
+        Array.from(document.getElementsByTagName(tag)).forEach(el => {
+            el.setAttribute('data-donguri-original','true');
+        });
+    });
+
+    // マーカー付き要素のみを div に置き換え
+    const tagMap = {
+        'H3': { size: '1.4em', bold: true,  margin: '6px' },
+        'H4': { size: '1.2em', bold: false, margin: '4px' },
+        'H5': { size: '1.1em', bold: false, margin: '4px' }
+    };
+    Object.entries(tagMap).forEach(([tag, { size, bold, margin }]) => {
+        Array.from(document.getElementsByTagName(tag))
+            .filter(el => el.getAttribute('data-donguri-original') === 'true')
+            .forEach(el => {
+                const d = document.createElement('div');
+                d.innerHTML = el.innerHTML;
+                d.style.fontSize   = size;
+                d.style.margin     = margin;
+                if (bold) d.style.fontWeight = 'bold';
+                // 元の属性もコピー
+                Array.from(el.attributes).forEach(a => d.setAttribute(a.name, a.value));
+                el.replaceWith(d);
+            });
+    });
+
+})();
