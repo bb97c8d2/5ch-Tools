@@ -1,100 +1,190 @@
 // ==UserScript==
 // @name         Donguri Bag Enhancer
 // @namespace    https://donguri.5ch.net/
-// @version      2.1.3
+// @version      4.6.2
 // @description  5ちゃんねる「どんぐりシステム」の「アイテムバッグ」ページ機能改良スクリプト。
 // @author       どんぐりID: bb97c8d2
 // @contributor  ChatGPT (OpenAI, assistant)
 // @license      Non-Commercial Personal Use Only
 // @match        https://donguri.5ch.net/bag
+// @match        https://donguri.5ch.net/transfer
 // @run-at       document-end
 // @grant        none
 // ==/UserScript==
 
-/*
-Copyright (c) 2025 bb97c8d2
+(function(){
+  'use strict';
 
-本スクリプトは、非商用・個人利用に限り、自由に使用・改変・再配布が可能です。
-商用利用、再販売、営利目的での利用は禁止します。
-利用により生じた損害について、作者は一切の責任を負いません。
-*/
+  // --- 共通定義 ---
+  const anchorKey   = 'donguriItemTableResetAnchor';
+  const overlayId   = 'donguriLoadingOverlay';
+  const tableIds    = ['necklaceTable','weaponTable','armorTable'];
+  const titleMap    = { necklaceTable: 'necklaceTitle', weaponTable: 'weaponTitle', armorTable: 'armorTitle' };
+  const labelMap    = { necklaceTable: '━━ ネックレス ━━', weaponTable: '━━ 武器 ━━', armorTable: '━━ 防具 ━━' };
+  const columnIds   = {
+    necklaceTable: { 'ネックレス':'necClm-Name','装':'necClm-Equp','解':'necClm-Lock','属性':'necClm-StEf','マリモ':'necClm-Mrim','分解':'necClm-Rycl','増減':'necClm-Dlta' },
+    weaponTable:   { '武器':'wepClm-Name','装':'wepClm-Equp','解':'wepClm-Lock','ATK':'wepClm-Atk','SPD':'wepClm-Spd','CRIT':'wepClm-Crit','ELEM':'wepClm-Elem','MOD':'wepClm-Mod','マリモ':'wepClm-Rrim','分解':'wepClm-Rycl' },
+    armorTable:    { '防具':'amrClm-Name','装':'amrClm-Equp','解':'amrClm-Lock','DEF':'amrClm-Def','WT':'amrClm-Wgt','CRIT':'amrClm-Crit','ELEM':'amrClm-Elem','MOD':'amrClm-Mod','マリモ':'amrClm-Rrim','分解':'amrClm-Rycl' }
+  };
+  const elemColors  = { '火':'#FFEEEE','氷':'#EEEEFF','雷':'#FFFFEE','風':'#EEFFEE','地':'#FFF0E0','水':'#EEFFFF','光':'#FFFFF0','闇':'#F0E0FF','なし':'#FFFFFF' };
+  const elemOrder   = { '火':0,'氷':1,'雷':2,'風':3,'地':4,'水':5,'光':6,'闇':7,'なし':8 };
+  const rarityOrder = { 'UR':0,'SSR':1,'SR':2,'R':3,'N':4 };
+  const gradeOrder  = { 'Pt':0,'Au':1,'Ag':2,'CuSn':3,'Cu':4 };
+  const buffKeywords   = ['強化された','増幅された','力を増した','クリアになった','加速した','高まった','固くなった','尖らせた'];
+  const debuffKeywords = ['静まった','弱まった','制限された','ぼやけた','減速した','減少した','砕けた','薄まった','緩んだ','侵食された','鈍らせた'];
+  const statusMap      = {
+    '攻撃の嵐':'storm','元素の混沌':'chaos','破滅の打撃':'blow','解き放たれた力':'release',
+    '精度の道':'accuracy','時間の流れ':'time','生命の本質':'life','石の守り':'stone',
+    '守護者の直感':'intuition','影のヴェール':'veil','運命の手':'hand','運命の盾':'shield','運命の賭博':'bet'
+  };
+  const HIDE_KEY         = 'donguriHideRecycleBtn';
+  const SHOW_DELTA_KEY   = 'donguriShowDeltaColumn';
 
-(function() {
-    'use strict';
+  // --- 状態管理変数 ---
+  let lastClickedCellId = null;
+  let recycleTableId    = null;
+  let recycleItemId     = null;
 
-    // --- ① 空の <p> を削除 ---
+  // --- Transfer ページ用: 送信先IDをデフォルト入力 ---
+  if (location.pathname === '/transfer') {
+    window.addEventListener('load', ()=>{
+      const input = document.getElementById('recipientid');
+      if (input) input.value = 'bb97c8d2';
+    });
+    return;
+  }
+
+  // --- 初期化処理 ---
+  function initAll(){
+    // --- 関数呼び出し ---
+    replaceTreasureLinks();
+    insertItemSummary();
+
+    // ──────────────────────────
+    // ★ 装備中アイテム見出し＆テーブルID付与　ここから
+    (function insertEquippedSection(){
+      const header = document.querySelector('header');
+      if (!header) return;
+      // 見出しの挿入
+        header.insertAdjacentHTML('afterend',
+          '<h2 style="font-size:1.5em; margin-top:1em;"><span style="color:red;">&block;</span> 装備中のアイテム</h2>'
+        );
+        document.querySelectorAll('h3').forEach(h3 => {
+          const text = h3.textContent.trim();
+          if (!text.includes('装備している')) return;
+          // ★(1) 「この h3 の次の兄弟要素」から順にたどって先に見つかった <table> 要素を拾う
+          let el = h3.nextElementSibling;
+          while (el && el.tagName !== 'TABLE') {
+            // <p>／<div> の中に table があればそれを使う
+            if ((el.tagName === 'P' || el.tagName === 'DIV')
+                && el.querySelector('table')) {
+                el = el.querySelector('table');
+                break;
+                }
+            el = el.nextElementSibling;
+          }
+          const table = (el && el.tagName === 'TABLE') ? el : null;
+          if (!table) {
+            console.warn('装備中テーブルが見つかりません:', text, h3);
+            h3.remove();
+            return;
+          }
+          // ★(2) テキストに応じて ID を振る
+          if (text.includes('ネックレス')) {
+            table.id = 'necklaceEquipped';
+          } else if (text.includes('防具')) {
+            table.id = 'armorEquipped';
+          } else if (text.includes('武器')) {
+            table.id = 'weaponEquipped';
+          }
+        // 見出し自体はもう不要なので削除
+        h3.remove();
+      });
+    })();
+    // ★ 装備中アイテム見出し＆テーブルID付与　ここまで
+    // ──────────────────────────
+
+    // --- 「アイテムバッグ」見出しの整理 ---
+    (function replaceBagHeading(){
+       const headings = Array.from(document.querySelectorAll('h1, h3'))
+           .filter(el => el.textContent.trim().startsWith('アイテムバッグ'));
+       if (headings.length < 2) return;
+       const old = headings[1];
+       const h2 = document.createElement('h2');
+       h2.style.fontSize  = '1.5em';
+       h2.style.marginTop = '1em';
+       h2.innerHTML = '<span style="color:red;">&block;</span> 所持アイテム一覧';
+       old.replaceWith(h2);
+    })();
+
+    // --- CSS 注入 ---
+    const style = document.createElement('style');
+      style.textContent = `
+      /* Pタグのマージンをクリア */
+      p {
+        margin-top:    unset;
+        margin-right:  unset;
+        margin-bottom: unset;
+        margin-left:   unset;
+      }
+
+      /* どんぐりバッグの画像を右寄せ */
+      @media (min-width:800px) {
+        img[src*="acorn-bag.jpg"] {
+          float: right;
+          margin: 0 0 1em 1em;;
+          max-width: 40%;
+        }
+      }
+
+      /* ページ上の「全て分解する」ボタンにのみ適用 */
+      form[action="https://donguri.5ch.net/recycleunlocked"] > button {
+        display: block;
+        margin: 8px auto;
+        font-size: 1em;
+        padding: 4px 8px;
+      }
+
+      /* 宝箱リンク用のリストレイアウト */
+      ul#treasurebox {
+        list-style: none;
+        padding: 0;
+        margin: 0 auto;
+        display: flex;
+        justify-content: center;
+        gap: 1em;
+        flex-wrap: wrap;
+        font-size: 1.2em;
+        font-weight: bold;
+      }
+
+      /* 装備中テーブルの幅とマージンを整形 */
+      table#weaponEquipped,
+      table#armorEquipped,
+      table#necklaceEquipped {
+        min-width: 100%;
+        margin: 0px auto 12px 0px;
+      }
+      `;
+    document.head.appendChild(style);
+    // --- CSS 注入 ここまで ---
+
+    // --- 空の <p> を削除 ---
     document.querySelectorAll('p').forEach(p => {
         if (!p.textContent.trim() && p.children.length === 0) {
             p.remove();
         }
     });
 
-    // --- ② CSS 注入 ---
-    const style = document.createElement('style');
-    style.textContent = `
-        @media (min-width:800px){
-            img[src*="acorn-bag.jpg"] {
-                float: right;
-                margin: 0 0 1em 1em;
-                max-width: 40%;
-            }
+    // --- 分解ボタンのラベル置換 ---
+    document.querySelectorAll('form[action*="recycleunlocked"] button').forEach(btn => {
+        if (btn.textContent.includes('ロックされていない武器防具を全て分解する')) {
+            btn.textContent = 'ロックされていないアイテムを全て分解する';
         }
-        form[action*="recycleunlocked"] button {
-            display: block;
-            margin: 8px auto;
-            font-size: 1em;
-            padding: 4px 8px;
-        }
-        #treasurebox {
-            list-style: none;
-            padding: 0;
-            margin: 0 auto;
-            display: flex;
-            justify-content: center;
-            gap: 1em;
-            flex-wrap: wrap;
-            font-size: 1.2em;
-            font-weight: bold;
-        }
-       #weaponEquiped,
-       #armorEquiped,
-       #necklaceEquiped {
-           min-width: 100％;
-           margin: 0em;
-       }
-    `;
-    document.head.appendChild(style);
+    });
 
-    // --- ③ 装備中アイテム見出し＆テーブルID付与 ---
-    (function insertEquippedSection(){
-        const header = document.querySelector('header');
-        if (!header) return;
-       // 見出し追加
-       header.insertAdjacentHTML('afterend',
-         '<h2 style="font-size:1.5em; margin-top:1em;"><span style="color:red;">&block;</span> 装備中のアイテム</h2>');
-
-        // 「装備している…」見出しをすべて処理
-        Array.from(document.querySelectorAll('h3')).forEach(h3 => {
-            const text = h3.textContent;
-            if (!text.includes('装備している')) return;
-            // 次の要素が <p> や <div> かもしれないので、テーブルを探す
-            const table = h3.parentNode.querySelector('table');
-            if (table) {
-                if (text.includes('武器')) {
-                    table.id = 'weaponEquiped';
-                } else if (text.includes('防具')) {
-                    table.id = 'armorEquiped';
-                } else if (text.includes('ネックレス')) {
-                    table.id = 'necklaceEquiped';
-                }
-            }
-            // 見出し自身を削除
-            h3.remove();
-        });
-    })();
-
-    // --- ④ 宝箱リンクの置換 ---
-    (function replaceTreasureLinks(){
+    // --- 宝箱リンクの置換 ---
+    function replaceTreasureLinks(){
         const anchors = Array.from(document.querySelectorAll('h3>a'))
             .filter(a => a.getAttribute('href').endsWith('chest'));
         if (anchors.length === 0) return;
@@ -107,59 +197,41 @@ Copyright (c) 2025 bb97c8d2
         const firstH3 = anchors[0].parentNode;
         firstH3.parentNode.insertBefore(ul, firstH3);
         anchors.forEach(a => a.parentNode.remove());
-    })();
+    }
 
-    // --- ⑤ アイテム数サマリの挿入 ---
-    (function insertItemSummary(){
-        const box = document.getElementById('treasurebox');
-        if (!box) return;
-        function countRows(id) {
-            const table = document.getElementById(id);
-            return table && table.rows.length > 1 ? table.rows.length - 1 : 0;
-        }
-        const n = countRows('necklaceTable');
-        const w = countRows('weaponTable');
-        const a = countRows('armorTable');
-        const tot = n + w + a;
-        const info = document.createElement('div');
-        info.style.marginTop = '1em';
-        info.innerHTML = `
-            <div style="font-size:1.1em;font-weight:bold">所持アイテム総数：${tot}</div>
-            <div style="font-size:1em">（ネックレス：${n}個／武器：${w}個／防具：${a}個）</div>
-        `;
-        const next = box.nextElementSibling;
-        if (next) next.parentNode.insertBefore(info, next);
-        else box.parentNode.appendChild(info);
-    })();
+    // --- アイテム数サマリの挿入 ---
+    function insertItemSummary(){
+      // treasurebox がなければ necklaceTitle を代替に
+      const ref = document.getElementById('treasurebox')
+                || document.getElementById('necklaceTitle');
+      if (!ref) return;
 
-    // --- ⑥ 分解ボタンのラベル置換 ---
-    document.querySelectorAll('form[action*="recycleunlocked"] button').forEach(btn => {
-        if (btn.textContent.includes('武器防具')) {
-            btn.textContent = 'ロックされていないアイテムを全て分解する';
-        }
-    });
+      function countRows(id) {
+        const table = document.getElementById(id);
+        return table?.tBodies[0]?.rows.length || 0;
+      }
 
-    // --- ⑦ 「アイテムバッグ」見出しの整理 ---
-   (function replaceBagHeading(){
-       const headings = Array.from(document.querySelectorAll('h1, h3'))
-           .filter(el => el.textContent.trim().startsWith('アイテムバッグ'));
-       if (headings.length < 2) return;
-       const old = headings[1];
-       const h2 = document.createElement('h2');
-       h2.style.fontSize  = '1.5em';
-       h2.style.marginTop = '1em';
-       h2.innerHTML = '<span style="color:red;">&block;</span> 所持アイテム一覧';
-       old.replaceWith(h2);
-   })();
+      const n   = countRows('necklaceTable'),
+            w   = countRows('weaponTable'),
+            a   = countRows('armorTable'),
+            tot = n + w + a;
 
-    // --- ⑧ サーバー由来の h3/h4/h5 タグを div に置き換え ---
+      const info = document.createElement('div');
+      info.style.marginTop = '1em';
+      info.innerHTML = `
+        <div style="font-size:1.1em;font-weight:bold">所持アイテム総数：${tot}</div>
+       <div style="font-size:1em">（ネックレス：${n}個／武器：${w}個／防具：${a}個）</div>
+      `;
+      ref.insertAdjacentElement('afterend', info);
+    }
+
+    // --- サーバー由来の h3/h4/h5 タグを div に置き換え ---
     // ページ読み込み時に存在する h3/h4/h5 タグにマーカーを付与
     ['h3','h4','h5'].forEach(tag => {
         Array.from(document.getElementsByTagName(tag)).forEach(el => {
             el.setAttribute('data-donguri-original','true');
         });
     });
-
     // マーカー付き要素のみを div に置き換え
     const tagMap = {
         'H3': { size: '1.4em', bold: true,  margin: '6px' },
@@ -180,5 +252,716 @@ Copyright (c) 2025 bb97c8d2
                 el.replaceWith(d);
             });
     });
+
+    // --- ＊＊＊ ---
+    try {
+      const id = sessionStorage.getItem(anchorKey);
+      if (id) scrollToAnchorCell();
+    } catch (_){ }
+
+    // --- 関数呼び出し ---
+    initLockToggle();
+    tableIds.forEach(processTable);
+    initRecycle();
+    initMenu();
+    initBulkRecycle();
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initAll);
+  } else {
+    initAll();
+  }
+
+  // --- クリック位置（セル）管理 ---
+  function recordClickedCell(cell, table){
+    let cellId = cell.id;
+    if (!cellId) {
+      const rows = Array.from(table.tBodies[0].rows);
+      const rowIndex = rows.indexOf(cell.parentElement);
+      const cellIndex = Array.prototype.indexOf.call(cell.parentElement.cells, cell);
+      cellId = `${table.id}-r${rowIndex}-c${cellIndex}`;
+      cell.id = cellId;
+    }
+    lastClickedCellId = cellId;
+    sessionStorage.setItem(anchorKey, cellId);
+  }
+  function scrollToAnchorCell(){
+    if (!lastClickedCellId) return;
+    const el = document.getElementById(lastClickedCellId);
+    if (el) {
+      const rect = el.getBoundingClientRect();
+      const y = window.pageYOffset + rect.top + rect.height/2 - window.innerHeight/2;
+      window.scrollTo({ top: y, behavior: 'auto' });
+    }
+    lastClickedCellId = null;
+    sessionStorage.removeItem(anchorKey);
+  }
+
+  // --- バーガーメニューUI初期化 ---
+  function initMenu(){
+    // バーガーメニューボタン
+    const btn = document.createElement('div');
+    Object.assign(btn.style,{position:'fixed',bottom:'0',left:'0',width:'50px',height:'50px',padding:'0',boxSizing:'border-box',border:'2px solid #006600',borderRadius:'8px',backgroundColor:'#009966',color:'#FFF',display:'flex',justifyContent:'center',alignItems:'center',fontSize:'2em',fontWeight:'bold',cursor:'pointer',zIndex:'999999'});
+    btn.textContent='☰'; document.body.appendChild(btn);
+    // サブウインドウ
+    const menu = document.createElement('div');
+    Object.assign(menu.style,{position:'fixed',bottom:'50px',left:'0',maxWidth:'450px',border:'3px solid #006600',borderRadius:'8px',padding:'12px 8px',backgroundColor:'#F6FFFF',display:'none',flexDirection:'column',alignItems:'flex-start',zIndex:'999998'});
+    const spacer = ()=>{ const sp=document.createElement('div'); sp.style.height='0.5em'; return sp; };
+
+    // --- ネックレス「増減」列表示設定（未設定時はOFF＝false） ---
+    const showDeltaLbl = document.createElement('label');
+    const showDeltaCk  = document.createElement('input'); showDeltaCk.type = 'checkbox';
+    showDeltaCk.checked = localStorage.getItem(SHOW_DELTA_KEY) === 'true';
+    showDeltaCk.addEventListener('change', ()=>{
+      const show = showDeltaCk.checked;
+      toggleDeltaColumn(show);
+      localStorage.setItem(SHOW_DELTA_KEY, show);
+    });
+    showDeltaLbl.append(showDeltaCk, document.createTextNode(' ネックレスに「増減」列を表示する'));
+    menu.appendChild(showDeltaLbl);
+    menu.appendChild(spacer());
+    // 初期表示：前回の設定を反映
+    toggleDeltaColumn(showDeltaCk.checked);
+
+    // --- ネックレス、武器、防具の「分解」列を隠す ---
+    const lbl = document.createElement('label'); lbl.style.fontSize='0.9em';
+    const cbg = document.createElement('input'); cbg.type='checkbox'; cbg.checked = localStorage.getItem('donguriHideColumn-global')==='true';
+    // 初期適用: 分解列
+    if (cbg.checked) tableIds.forEach(id=> document.querySelectorAll(`.${columnIds[id]['分解']}`).forEach(el=>el.style.display='none'));
+    cbg.addEventListener('change', ()=>{
+      localStorage.setItem('donguriHideColumn-global', cbg.checked);
+      tableIds.forEach(id=> document.querySelectorAll(`.${columnIds[id]['分解']}`).forEach(el=>el.style.display=cbg.checked?'none':''));
+    });
+    lbl.append(cbg, document.createTextNode(' ネックレス、武器、防具の「分解」列を隠す'));
+    menu.appendChild(lbl); menu.appendChild(spacer());
+
+    // --- ページの「全て分解する」ボタンを隠す ---
+    const hideRecycleLbl = document.createElement('label');
+    const hideRecycleCk  = document.createElement('input'); hideRecycleCk.type='checkbox';
+    hideRecycleCk.checked = localStorage.getItem(HIDE_KEY) === 'true';
+    // 初期適用: 全分解ボタン
+    if (hideRecycleCk.checked) document.querySelectorAll('button, a').forEach(el=>{ if (el.textContent==='ロックされていないアイテムを全て分解する' && !menu.contains(el)) el.style.display='none'; });
+    hideRecycleCk.addEventListener('change', ()=>{
+      localStorage.setItem(HIDE_KEY, hideRecycleCk.checked);
+      document.querySelectorAll('button, a').forEach(el=>{ if (el.textContent==='ロックされていないアイテムを全て分解する' && !menu.contains(el)) el.style.display=hideRecycleCk.checked?'none':''; });
+    });
+    hideRecycleLbl.append(hideRecycleCk, document.createTextNode(' ページの「全て分解する」ボタンを隠す'));
+    menu.appendChild(hideRecycleLbl); menu.appendChild(spacer());
+
+    // --- 分解アラート設定UI ---
+    const alertDiv    = document.createElement('div');
+    alertDiv.style.cssText = 'margin:0px;padding:8px;border:1px solid #666;border-radius:4px';
+    const alertTitle  = document.createElement('div');
+    alertTitle.textContent = '「全て分解」まきこみアラート';
+    alertTitle.style.cssText = 'font-size:1.1em;font-weight:bold';
+    alertDiv.appendChild(alertTitle);
+    // グレードチェックボックス
+    const gradeDiv2   = document.createElement('div');
+    gradeDiv2.style.cssText = 'display:flex;flex-wrap:wrap;gap:12px;margin:8px 12px 8px 0px';
+    { const defs = {'プラチナ':'Pt','金':'Au','銀':'Ag','青銅':'CuSn','銅':'Cu'};
+      for(const [label,val] of Object.entries(defs)){
+        const ck = document.createElement('input'); ck.type  = 'checkbox'; ck.value = val; ck.id    = `alert-grade-${val}`;
+        ck.checked = localStorage.getItem(ck.id) === 'true';
+        const lb = document.createElement('label'); lb.append(ck, document.createTextNode(' '+label));
+        gradeDiv2.appendChild(lb);
+        ck.addEventListener('change', ()=>{ localStorage.setItem(ck.id, ck.checked); });
+      }
+    }
+    alertDiv.appendChild(gradeDiv2);
+    // レアリティチェックボックス
+    const rarityDiv2 = document.createElement('div');
+    rarityDiv2.style.cssText = 'display:flex;flex-wrap:wrap;gap:12px;margin:8px 12px 8px 0px';
+    for(const rk of ['UR','SSR','SR','R','N']){
+      const ck = document.createElement('input'); ck.type  = 'checkbox'; ck.value = rk; ck.id    = `alert-rarity-${rk}`;
+      ck.checked = localStorage.getItem(ck.id) === 'true';
+      const lb = document.createElement('label'); lb.append(ck, document.createTextNode(' '+rk)); rarityDiv2.appendChild(lb);
+      ck.addEventListener('change', ()=>{ localStorage.setItem(ck.id, ck.checked); });
+    }
+    alertDiv.appendChild(rarityDiv2);
+    menu.appendChild(alertDiv);
+    menu.appendChild(spacer());
+
+    // --- 「全て分解する」ボタン ---
+    const allForm=document.createElement('form'); allForm.action='https://donguri.5ch.net/recycleunlocked'; allForm.method='POST';
+    const allBtn=document.createElement('button'); allBtn.type='submit'; allBtn.textContent='ロックされていないアイテムを全て分解する'; allBtn.style.cssText='fontSize:0.9em; padding:6px; margin:4px 0px;';
+    allForm.appendChild(allBtn); menu.appendChild(allForm); menu.appendChild(spacer());
+
+    // --- ナビボタン ---
+    const nav = document.createElement('div');
+    nav.style.cssText = 'display:flex;gap:8px;align-items:center;margin:8px 0px 0px 0px;padding:0px;'
+    // ← ここで先頭に「移動：」を追加
+    const navLabel = document.createElement('span'); navLabel.textContent = '移動:'; navLabel.style.cssText = 'fontSize:1.2em;fontWeight:bold'; nav.appendChild(navLabel);
+    const topBtn = document.createElement('button'); topBtn.textContent='PageTOP'; topBtn.style.fontSize='0.9em'; topBtn.addEventListener('click', ()=>window.scrollTo({top:0,behavior:'smooth'})); nav.appendChild(topBtn);
+    for(const o of [{text:'ネックレス',id:'necklaceTitle'},{text:'　武器　',id:'weaponTitle'},{text:'　防具　',id:'armorTitle'}]){
+      const b = document.createElement('button'); b.textContent=o.text; b.style.fontSize='0.8em'; b.addEventListener('click', ()=>document.getElementById(o.id)?.scrollIntoView({behavior:'smooth'})); nav.appendChild(b);
+    }
+    menu.appendChild(nav);
+    menu.appendChild(spacer());
+
+    const link = document.createElement('div'); link.style.fontSize='0.7em';
+    link.innerHTML='customized by bb97c8d2　（<a href="https://donguri.5ch.net/transfer" target="_blank">どんぐり転送サービス</a>）';
+    menu.appendChild(link);
+
+    document.body.appendChild(menu);
+    btn.addEventListener('click', ()=>{ menu.style.display = menu.style.display==='none' ? 'flex' : 'none'; });
+  }
+
+  // --- ヘルパー関数 ---
+  // --- necklaceTableの増減列の表示/非表示を切替 ---
+  function toggleDeltaColumn(show) {
+    document.querySelectorAll(`.${columnIds['necklaceTable']['増減']}`)
+      .forEach(el => el.style.display = show ? '' : 'none');
+  }
+
+  function recordClickedCell(cell, table){
+    let cellId = cell.id;
+    if (!cellId) {
+      const rows = Array.from(table.tBodies[0].rows);
+      const rowIndex = rows.indexOf(cell.parentElement);
+      const cellIndex = Array.prototype.indexOf.call(cell.parentElement.cells, cell);
+      cellId = `${table.id}-r${rowIndex}-c${cellIndex}`;
+      cell.id = cellId;
+    }
+    lastClickedCellId = cellId;
+    sessionStorage.setItem(anchorKey, cellId);
+  }
+
+  function scrollToAnchorCell(){
+    if (!lastClickedCellId) return;
+    const el = document.getElementById(lastClickedCellId);
+    if (el) {
+      const r = el.getBoundingClientRect();
+      const y = window.pageYOffset + r.top + r.height/2 - window.innerHeight/2;
+      window.scrollTo({ top: y, behavior: 'auto' });
+    }
+    lastClickedCellId = null;
+    sessionStorage.removeItem(anchorKey);
+  }
+
+  function showOverlay(text){
+    let ov = document.getElementById(overlayId);
+    if (!ov) {
+      ov = document.createElement('div');
+      ov.id = overlayId;
+      Object.assign(ov.style, {
+        position:'fixed',top:0,left:0,width:'100%',height:'100%',
+        backgroundColor:'rgba(0,0,0,0.5)',color:'#fff',
+        display:'flex',justifyContent:'center',alignItems:'center',
+        fontSize:'1.5em',zIndex:9999
+      });
+      document.body.appendChild(ov);
+    }
+    ov.textContent = text;
+    ov.style.display = 'flex';
+    ov.addEventListener('click', hideOverlay, { once:true });
+  }
+
+  function hideOverlay(){
+    const ov = document.getElementById(overlayId);
+    if (ov) ov.style.display = 'none';
+  }
+
+  // --- 確認ダイアログを出す ---
+  function showConfirm(message){
+    return new Promise(resolve => {
+      const existing = document.getElementById('donguriConfirmOverlay');
+      if (existing) existing.remove();
+      const ov = document.createElement('div');
+      ov.id = 'donguriConfirmOverlay';
+      Object.assign(ov.style, {
+        position:'fixed',top:0,left:0,width:'100%',height:'100%',
+        backgroundColor:'rgba(0,0,0,0.5)',
+        display:'flex',justifyContent:'center',alignItems:'center',zIndex:10000
+      });
+      const box = document.createElement('div');
+      Object.assign(box.style, {
+        backgroundColor:'#fff',padding:'20px',borderRadius:'8px',
+        border:'5px solid #FF6600',textAlign:'center',color:'#000',
+        maxWidth:'80%',fontSize:'1.1em'
+      });
+      // 第一段落を引数で受け取る
+      const p1 = document.createElement('p');
+      p1.textContent = message;
+      const p2 = document.createElement('p');
+      p2.textContent = 'このまま分解を行いますか？';
+      box.append(p1,p2);
+      const btns = document.createElement('div'); btns.style.marginTop='16px';
+      const ok = document.createElement('button');   ok.textContent='分解する'; ok.style.margin='10px';
+      const no = document.createElement('button');   no.textContent='キャンセル'; no.style.margin='10px';
+      btns.append(ok,no);
+      box.appendChild(btns);
+      ov.appendChild(box);
+      document.body.appendChild(ov);
+      ok.addEventListener('click', ()=>{ ov.remove(); resolve(true); });
+      no.addEventListener('click', ()=>{ ov.remove(); resolve(false); });
+    });
+  }
+
+  // --- 一括分解送信の保留＆確認機能 ---
+  function initBulkRecycle(){
+    const forms = document.querySelectorAll('form[action="https://donguri.5ch.net/recycleunlocked"][method="POST"]');
+    forms.forEach(form=>{
+      form.addEventListener('submit', async e=>{
+        e.preventDefault();
+        showOverlay('まとめて分解します…');
+        // ユーザーがチェックしたグレード／レアリティを収集
+        const selectedGrades    = Array.from(document.querySelectorAll('input[id^="alert-grade-"]:checked')).map(i=>i.value);
+        const selectedRarities  = Array.from(document.querySelectorAll('input[id^="alert-rarity-"]:checked')).map(i=>i.value);
+              const foundTypes = new Set();
+
+         // テーブルを順に調べて
+        for (const id of tableIds){
+          const table = document.getElementById(id);
+          if (!table?.tHead) continue;
+          const hdrs = table.tHead.rows[0].cells;
+          let lockIdx=-1,nameIdx=-1;
+          for (let i=0;i<hdrs.length;i++){
+            const t = hdrs[i].textContent.trim();
+            if (t==='解')      lockIdx = i;
+            if (t==='ネックレス' && id==='necklaceTable') nameIdx = i;
+            if (t==='武器'     && id==='weaponTable')     nameIdx = i;
+            if (t==='防具'     && id==='armorTable')      nameIdx = i;
+          }
+          if (lockIdx<0||nameIdx<0) continue;
+
+          Array.from(table.tBodies[0].rows).forEach(row=>{
+            // アンロック済みだけ対象
+            if (!row.cells[lockIdx].querySelector('a[href*="/lock/"]')) return;
+            const text = row.cells[nameIdx].textContent;
+            // レアリティ
+            selectedRarities.forEach(rk => {
+               if (text.includes(rk)) foundTypes.add(rk);
+            });
+            // グレード
+            selectedGrades.forEach(gd => {
+               if (text.includes(gd)) foundTypes.add(gd);
+            });
+          });
+        }
+
+        // １つでもヒットしたら警告
+        if (foundTypes.size > 0){
+        const labels = Array.from(foundTypes).join(', ');
+        const ok = await showConfirm(`分解するアイテムに ${labels} が含まれています。`);
+        if (!ok){
+            hideOverlay();
+            return;
+         }
+      }
+
+      // 実行
+      try {
+        await fetch(form.action,{method:'POST'});
+           location.reload();
+        } catch{ hideOverlay(); }
+      });
+    });
+  }
+
+  // --- ロック/アンロック切替機能 ---
+  function initLockToggle(){
+    tableIds.forEach(id=>{
+      const table = document.getElementById(id);
+      if (!table || !table.tHead) return;
+      const colMap = columnIds[id];
+      const hdrs   = Array.from(table.tHead.rows[0].cells);
+      let lockIdx=-1,ryclIdx=-1;
+      hdrs.forEach((th,i)=>{
+        const t = th.textContent.trim();
+        if (!colMap[t]) return;
+        th.classList.add(colMap[t]);
+        if (t==='解') lockIdx=i;
+        if (t==='分解') ryclIdx=i;
+      });
+      Array.from(table.tBodies[0].rows).forEach(row=>{
+        if (lockIdx>=0) row.cells[lockIdx].classList.add(colMap['解']);
+        if (ryclIdx>=0) row.cells[ryclIdx].classList.add(colMap['分解']);
+      });
+      // 初期色付け
+      if (lockIdx>=0){
+        Array.from(table.tBodies[0].rows).forEach(row=>{
+          const cell = row.cells[lockIdx];
+          if (cell.querySelector('a[href*="/lock/"]')){
+            Object.assign(cell.style,{backgroundColor:'#FF6600',color:'#FFF'});
+            cell.querySelector('a').style.color = '#FFF';
+          }
+        });
+      }
+      // イベント
+      table.addEventListener('click', async e=>{
+        const a = e.target.closest('a[href*="/lock/"],a[href*="/unlock/"]');
+        if (!a) return;
+        const td = a.closest(`td.${colMap['解']}`);
+        if (!td) return;
+        e.preventDefault();
+        showOverlay(a.href.includes('/unlock/') ? 'アンロックしています...' : 'ロックしています...');
+        try {
+          const [,op,itemId] = a.href.match(/\/(unlock|lock)\/(\d+)/) || [];
+          const res = await fetch(a.href);
+          const html = await res.text();
+          const doc  = new DOMParser().parseFromString(html,'text/html');
+          const newTable = doc.getElementById(id);
+          let newLockIdx=-1,newRyclIdx=-1;
+          Array.from(newTable.tHead.rows[0].cells).forEach((th,i)=>{
+            if (th.textContent.trim()==='解') newLockIdx=i;
+            if (th.textContent.trim()==='分解') newRyclIdx=i;
+          });
+          const targetA = Array.from(newTable.tBodies[0].rows)
+                               .map(r=>r.cells[newLockIdx])
+                               .find(c=>c.querySelector(`a[href*="/${itemId}"]`));
+          const targetB = targetA?.closest('tr').cells[newRyclIdx] || null;
+          td.innerHTML = targetA.innerHTML;
+          td.closest('tr').querySelector(`td.${colMap['分解']}`).innerHTML = targetB?.innerHTML||'';
+          // 再色付け
+          Array.from(table.tBodies[0].rows).forEach(row=>{
+            const c = row.cells[newLockIdx];
+            if (c.querySelector('a[href*="/lock/"]')){
+              Object.assign(c.style,{backgroundColor:'#FF6600',color:'#FFF'});
+              c.querySelector('a').style.color = '#FFF';
+            } else {
+              Object.assign(c.style,{backgroundColor:'',color:''});
+            }
+          });
+        } catch{}
+        finally{ hideOverlay(); }
+      });
+    });
+  }
+
+  // --- 分解機能改良 ---
+  function initRecycle(){
+    tableIds.forEach(id=>{
+      const table = document.getElementById(id);
+      if (!table) return;
+      table.addEventListener('click', async e=>{
+        const a = e.target.closest('a[href*="/recycle/"]');
+        if (!a) return;
+        e.preventDefault();
+        const m = a.href.match(/\/recycle\/(\d+)/);
+        if (!m) return;
+        recycleTableId = id;
+        recycleItemId  = m[1];
+        showOverlay('分解しています...');
+        try {
+          const res = await fetch(a.href);
+          const html = await res.text();
+          const doc  = new DOMParser().parseFromString(html,'text/html');
+          const newTable = doc.getElementById(recycleTableId);
+          let found = false;
+          if (newTable?.tBodies[0]){
+            Array.from(newTable.tBodies[0].rows).forEach(row=>{
+              if (row.querySelector(`a[href*="/recycle/${recycleItemId}"]`)) found = true;
+            });
+          }
+          if (found){
+            hideOverlay();
+            location.reload();
+          } else {
+            const curr = document.getElementById(recycleTableId);
+            if (curr?.tBodies[0]){
+              Array.from(curr.tBodies[0].rows).forEach(row=>{
+                if (row.querySelector(`a[href*="/recycle/${recycleItemId}"]`)) row.remove();
+              });
+            }
+            hideOverlay();
+          }
+        } catch{ hideOverlay(); }
+        recycleTableId = null;
+        recycleItemId  = null;
+      });
+    });
+  }
+
+  // --- テーブル加工機能 ---
+  function processTable(id){
+    const table = document.getElementById(id);
+    if (!table || !table.tHead) return;
+    table.style.margin = '8px 0 24px';
+    const colMap = columnIds[id];
+    // タイトル挿入
+    if (!document.getElementById(titleMap[id])){
+      const h3 = document.createElement('h3');
+      h3.id = titleMap[id];
+      h3.textContent = labelMap[id];
+      Object.assign(h3.style,{margin:'0',padding:'0'});
+      table.insertAdjacentElement('beforebegin', h3);
+    }
+    const headerRow = table.tHead.rows[0];
+    const hdrs = Array.from(headerRow.cells);
+    // ヘッダー整形
+    hdrs.forEach(th=>{
+      th.style.backgroundColor = '#F0F0F0';
+      th.style.color           = '#000';
+      th.style.cursor          = 'default';
+      const cls = colMap[th.textContent.trim()];
+      if (cls) th.classList.add(cls);
+    });
+    const idxMap = {};
+    hdrs.forEach((th,i)=>{
+      const t = th.textContent.trim();
+      if (colMap[t]) idxMap[t] = i;
+    });
+
+    // 「解」ソート
+    const lockIdx = idxMap['解'];
+    if (lockIdx != null){
+      let asc = true;
+      const th = hdrs[lockIdx];
+      th.style.cursor='pointer';
+      th.addEventListener('click', ()=>{
+        const rows = Array.from(table.tBodies[0].rows);
+        rows.sort((a,b)=>{
+          const aHas = !!a.cells[lockIdx].querySelector('a[href*="/lock/"]');
+          const bHas = !!b.cells[lockIdx].querySelector('a[href*="/lock/"]');
+          return asc ? (bHas - aHas) : (aHas - bHas);
+        });
+        rows.forEach(r=>table.tBodies[0].appendChild(r));
+        asc = !asc;
+        scrollToAnchorCell();
+      });
+    }
+
+    // ネックレス固有：増減列追加＆フィルターUI
+    if (id==='necklaceTable'){
+      const pos = idxMap['属性'] + 1;
+      // 増減列ヘッダー
+      const dTh = document.createElement('th');
+      dTh.classList.add(columnIds['necklaceTable']['増減']);
+      dTh.textContent='増減';
+      Object.assign(dTh.style,{backgroundColor:'#F0F0F0',color:'#000',textAlign:'center',cursor:'pointer'});
+      headerRow.insertBefore(dTh, headerRow.cells[pos]);
+      // 各行に計算セル
+      Array.from(table.tBodies[0].rows).forEach(row=>{
+        const td = document.createElement('td');
+        td.classList.add(columnIds['necklaceTable']['増減']);
+        td.style.textAlign='center';
+        row.insertBefore(td, row.cells[pos]);
+        let tot = 0;
+        row.cells[idxMap['属性']].querySelectorAll('li').forEach(li=>{
+          const m = li.textContent.trim().match(/(\d+)%\s*(.+)$/);
+          if (!m) return;
+          const v = +m[1], k = m[2].trim();
+          tot += buffKeywords.includes(k)? v : debuffKeywords.includes(k)? -v : 0;
+        });
+        td.textContent = tot>0? '△'+tot : tot<0? '▼'+Math.abs(tot) : '';
+      });
+      // ソート（△はプラス、▼はマイナス）
+      let ascNum=true;
+      dTh.addEventListener('click', ()=>{
+        const rows = Array.from(table.tBodies[0].rows);
+        rows.sort((a,b)=>{
+          const txtA = a.cells[pos].textContent.trim();
+          const txtB = b.cells[pos].textContent.trim();
+          const va = txtA.startsWith('△')
+                    ?  parseInt(txtA.slice(1),10)
+                    : txtA.startsWith('▼')
+                    ? -parseInt(txtA.slice(1),10)
+                    : 0;
+          const vb = txtB.startsWith('△')
+                    ?  parseInt(txtB.slice(1),10)
+                    : txtB.startsWith('▼')
+                    ? -parseInt(txtB.slice(1),10)
+                    : 0;
+          return ascNum ? (vb - va) : (va - vb);
+        });
+        rows.forEach(r=>table.tBodies[0].appendChild(r));
+        ascNum = !ascNum;
+        scrollToAnchorCell();
+      });
+      const sc=document.createElement('div');
+      sc.style.display='flex';
+      sc.style.flexWrap='wrap';
+      sc.style.gap='8px';
+      sc.style.margin='0px';
+      const chks=[];
+      Object.keys(statusMap).forEach(label=>{
+        const lb=document.createElement('label');
+        lb.style.fontSize='1.0em';
+        const ck=document.createElement('input');
+        ck.type='checkbox';
+        ck.value=label;
+        ck.checked=false;
+        ck.addEventListener('change',applyFilter);
+        chks.push(ck);
+        lb.append(ck,document.createTextNode(' '+label));
+        sc.appendChild(lb);
+      });
+      table.insertAdjacentElement('beforebegin',sc);
+
+      const bd=document.createElement('div');
+      bd.style.display='flex';
+      bd.style.gap='8px';
+      bd.style.margin='0px';
+      [['全解除',()=>{chks.forEach(c=>c.checked=false);applyFilter();}],['再読込',()=>{chks.forEach(c=>c.checked=false);applyFilter();}]].forEach(([t,fn])=>{
+        const b=document.createElement('button');
+        b.textContent=t;
+        Object.assign(b.style,{fontSize:'0.9em',padding:'4px 8px',margin:'10px'});
+        b.addEventListener('click',fn);
+        bd.appendChild(b);
+      });
+      sc.insertAdjacentElement('beforebegin',bd);
+
+      function applyFilter(){
+        const act=chks.filter(c=>c.checked).map(c=>c.value);
+        Array.from(table.tBodies[0].rows).forEach(r=>{
+          if(act.length===0){ r.style.display=''; return; }
+          const txt=r.cells[idxMap['属性']].textContent;
+          r.style.display=act.every(a=>txt.includes(a))?'':'none';
+        });
+        scrollToAnchorCell();
+      }
+      applyFilter();
+    }
+
+    // 武器・防具固有：レアリティ／属性フィルターUI
+    if (id==='weaponTable'||id==='armorTable') {
+      const ui=document.createElement('div');
+      ui.className='filter-ui';
+      ui.style.margin='0px';
+      const r2=document.createElement('div');
+      r2.style.marginTop='4px';
+      [['全選択',()=>{setAll(true);applyFilter();applyColor();}],['全解除',()=>{setAll(false);applyFilter();applyColor();}],['再読込',()=>location.reload()]].forEach(([txt,fn])=>{
+        const b=document.createElement('button');
+        b.textContent=txt;
+        Object.assign(b.style,{fontSize:'0.9em',padding:'4px 8px',margin:'10px'});
+        b.addEventListener('click',fn);
+        r2.appendChild(b);
+      });
+      ui.appendChild(r2);
+
+      const r3=document.createElement('div');
+      Object.assign(r3.style,{marginTop:'6px',display:'flex',alignItems:'center'});
+      const s3=document.createElement('span'); s3.textContent='Rarity：'; s3.style.fontSize='1.2em';
+      r3.appendChild(s3);
+      const elm={};
+      ['UR','SSR','SR','R','N'].forEach(rk=>{
+        const lbl=document.createElement('label');
+        lbl.style.margin='0 4px';
+        const chk=document.createElement('input');
+        chk.type='checkbox';
+        chk.checked=true;
+        chk.addEventListener('change',applyFilter);
+        elm[rk]=chk;
+        lbl.append(chk,document.createTextNode(' '+rk));
+        r3.appendChild(lbl);
+      });
+      ui.appendChild(r3);
+
+      const r4=document.createElement('div');
+      Object.assign(r4.style,{marginTop:'6px',display:'flex',alignItems:'center'});
+      const s4=document.createElement('span'); s4.textContent='Element：'; s4.style.fontSize='1.2em';
+      r4.appendChild(s4);
+      const rarObj={};
+      Object.keys(elemColors).forEach(a=>{
+        const lbl=document.createElement('label');
+        lbl.style.margin='0 4px';
+        const chk=document.createElement('input');
+        chk.type='checkbox';
+        chk.checked=true;
+        chk.addEventListener('change',()=>{applyFilter();applyColor();});
+        rarObj[a]=chk;
+        lbl.append(chk,document.createTextNode(' '+a));
+        r4.appendChild(lbl);
+      });
+      ui.appendChild(r4);
+
+      table.insertAdjacentElement('beforebegin',ui);
+
+      const elemCol=idxMap['ELEM'];
+      const nameTitle=id==='weaponTable'?'武器':'防具';
+      const rankCol=idxMap[nameTitle];
+      const mrimCol=idxMap['マリモ'];
+      let ascMulti=true;
+
+      function setAll(v){ Object.values(elm).forEach(x=>x.checked=v); Object.values(rarObj).forEach(x=>x.checked=v); }
+      function applyColor(){ Array.from(table.tBodies[0].rows).forEach(r=>{ const v=r.cells[elemCol].textContent.replace(/[0-9]/g,'').trim()||'なし'; r.cells[elemCol].style.backgroundColor=elemColors[v]; }); }
+      function applyFilter(){ Array.from(table.tBodies[0].rows).forEach(r=>{ const e=r.cells[elemCol].textContent.replace(/[0-9]/g,'').trim()||'なし'; const rt=(r.cells[rankCol].textContent.match(/UR|SSR|SR|R|N/)||['N'])[0]; r.style.display=(elm[rt].checked&&rarObj[e].checked)?'':'none'; }); }
+
+      function multiSort(order){
+        const rows=Array.from(table.tBodies[0].rows).filter(r=>r.style.display!=='none');
+        rows.sort((a,b)=>{
+          const ra=(a.cells[rankCol].textContent.match(/UR|SSR|SR|R|N/)||['N'])[0];
+          const rb=(b.cells[rankCol].textContent.match(/UR|SSR|SR|R|N/)||['N'])[0];
+          let d=order?rarityOrder[ra]-rarityOrder[rb]:rarityOrder[rb]-rarityOrder[ra];
+          if(d) return d;
+          const ea=a.cells[elemCol].textContent.replace(/[0-9]/g,'').trim()||'なし';
+          const eb=b.cells[elemCol].textContent.replace(/[0-9]/g,'').trim()||'なし';
+          d=order?elemOrder[ea]-elemOrder[eb]:elemOrder[eb]-elemOrder[ea];
+          if(d) return d;
+          const ma=parseInt(a.cells[mrimCol].textContent.replace(/[^0-9]/g,''),10)||0;
+          const mb=parseInt(b.cells[mrimCol].textContent.replace(/[^0-9]/g,''),10)||0;
+          return order?mb-ma:ma-mb;
+        });
+        rows.forEach(r=>table.tBodies[0].appendChild(r));
+      }
+
+      hdrs[elemCol].style.cursor='pointer';
+      hdrs[elemCol].addEventListener('click',()=>{
+        multiSort(ascMulti);
+        ascMulti=!ascMulti;
+        applyFilter();applyColor();
+        scrollToAnchorCell();
+      });
+
+      // --- 名称列セルをクリックによるフィルター→ソート→スクロール ---
+      Array.from(table.tBodies[0].rows).forEach(r=>{ 
+        const cell = r.cells[rankCol];
+        cell.style.cursor = 'pointer';
+        cell.addEventListener('click',()=>{
+          // クリックしたセルを記憶
+          recordClickedCell(cell, table);
+          // 既存の絞り込み・ソート処理
+          const clicked = (cell.textContent.match(/UR|SSR|SR|R|N/)||['N'])[0];
+          Object.keys(elm).forEach(rk => elm[rk].checked = (rk === clicked));
+          applyFilter(); applyColor(); multiSort(true);
+          // 記憶したセルを画面垂直中央にスクロール
+          scrollToAnchorCell();
+        });
+      });
+
+      // --- ELEM列セルクリックによるフィルター→ソート→スクロール ---
+      Array.from(table.tBodies[0].rows).forEach(row=>{
+        const cell = row.cells[elemCol];
+        cell.style.cursor = 'pointer';
+        cell.addEventListener('click',()=>{
+          // クリックしたセルを記憶
+          recordClickedCell(cell, table);
+          // クリックしたセルから「火,氷…なし」を抽出
+          const clicked = (cell.textContent.match(/[^\d]+$/)||['なし'])[0];
+          // 対応するチェックボックスだけONに
+          Object.keys(rarObj).forEach(el=> rarObj[el].checked = (el === clicked));
+          // フィルタ・色・ソート・スクロール
+          applyFilter();
+          applyColor();
+          multiSort(ascMulti);
+          ascMulti = !ascMulti;
+          scrollToAnchorCell();
+        });
+      });
+
+      const oldTh=hdrs[nameTitle=== '武器' ? idxMap['武器'] : idxMap['防具']];
+      const newTh=oldTh.cloneNode(true);
+      oldTh.parentNode.replaceChild(newTh,oldTh);
+      newTh.style.cursor='pointer';
+      let ascName=true;
+      newTh.addEventListener('click',()=>{
+        multiSort(ascName);
+        ascName=!ascName;
+        scrollToAnchorCell();
+      });
+
+      Array.from(table.tBodies[0].rows).forEach(r=>{ const cell=r.cells[rankCol];
+        cell.style.cursor='pointer';
+        cell.addEventListener('click',()=>{
+          const clicked=(cell.textContent.match(/UR|SSR|SR|R|N/)||['N'])[0];
+          Object.keys(elm).forEach(rk=>elm[rk].checked=(rk===clicked));
+          applyFilter();applyColor();multiSort(true);
+          scrollToAnchorCell();
+        });
+      });
+
+      applyFilter();applyColor();
+    }
+  }
 
 })();
